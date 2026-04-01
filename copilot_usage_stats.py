@@ -22,7 +22,7 @@ import pandas as pd
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession, Row
-from pyspark.sql.types import NullType, StringType
+from pyspark.sql.types import NullType, StringType, ArrayType, StructType, StructField, MapType
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -159,6 +159,28 @@ def fetch_file_content(file_path):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def fix_null_types(data_type):
+    """Recursively replace NullType with StringType in any schema."""
+    if isinstance(data_type, NullType):
+        return StringType()
+    if isinstance(data_type, ArrayType):
+        return ArrayType(fix_null_types(data_type.elementType), data_type.containsNull)
+    if isinstance(data_type, MapType):
+        return MapType(fix_null_types(data_type.keyType), fix_null_types(data_type.valueType), data_type.valueContainsNull)
+    if isinstance(data_type, StructType):
+        return StructType([StructField(f.name, fix_null_types(f.dataType), f.nullable) for f in data_type.fields])
+    return data_type
+
+
+def apply_fixed_schema(df):
+    """Cast DataFrame columns so no NullType remains anywhere in the schema."""
+    new_schema = fix_null_types(df.schema)
+    for old_field, new_field in zip(df.schema.fields, new_schema.fields):
+        if old_field.dataType != new_field.dataType:
+            df = df.withColumn(new_field.name, df[new_field.name].cast(new_field.dataType))
+    return df
+
+
 def save_raw_json(file_name, content, df):
     """Save the original JSON content to Azure storage."""
     json_path = f"{JSON_BASE_PATH}/{file_name.rsplit('.', 1)[0]}"
@@ -206,10 +228,8 @@ def run():
         pdf.columns = [c.replace(".", "_") for c in pdf.columns]
         df = spark.createDataFrame(pdf)
 
-        # Cast NullType columns to StringType (Delta doesn't support NullType)
-        for field in df.schema.fields:
-            if isinstance(field.dataType, NullType):
-                df = df.withColumn(field.name, df[field.name].cast(StringType()))
+        # Recursively cast NullType to StringType (Delta/Parquet don't support NullType)
+        df = apply_fixed_schema(df)
 
         suffix = file_name_to_table_suffix(file_name)
         delta_table = f"{TABLE_PREFIX}_{suffix}"
