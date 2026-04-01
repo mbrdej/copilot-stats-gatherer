@@ -193,7 +193,10 @@ def run():
 
         # Build a Spark DataFrame from the raw JSON — no transformation
         records = content if isinstance(content, list) else [content]
-        df = spark.createDataFrame(pd.json_normalize(records))
+        pdf = pd.json_normalize(records)
+        # Replace dots in column names — Spark treats dots as struct access
+        pdf.columns = [c.replace(".", "_") for c in pdf.columns]
+        df = spark.createDataFrame(pdf)
 
         # Cast NullType columns to StringType (Delta doesn't support NullType)
         for field in df.schema.fields:
