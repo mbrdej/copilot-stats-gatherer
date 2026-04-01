@@ -14,6 +14,7 @@ import pandas as pd
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession, Row
+from pyspark.sql.types import NullType, StringType
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -25,8 +26,9 @@ GITLAB_API_URL = "https://git.easypack24.net/api/v4"
 CATALOG = "dev"
 SCHEMA = "tmr_team"
 TABLE_PREFIX = f"{CATALOG}.{SCHEMA}.bronze_copilot"
-PARQUET_BASE_PATH = f"/mnt/{CATALOG}/{SCHEMA}/copilot_usage"
-JSON_BASE_PATH = f"/mnt/{CATALOG}/{SCHEMA}/copilot_usage_json"
+AZURE_BASE_PATH = "abfss://powerbi@stadaitmrdevyjsuxa.dfs.core.windows.net"
+PARQUET_BASE_PATH = f"{AZURE_BASE_PATH}/copilot_usage"
+JSON_BASE_PATH = f"{AZURE_BASE_PATH}/copilot_usage_json"
 ERROR_LOG_TABLE = f"{CATALOG}.{SCHEMA}.copilot_usage_error_logs"
 
 PROJECT_PATH = "ait/copilot-usage-stats"
@@ -149,10 +151,10 @@ def fetch_file_content(file_path):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def save_raw_json(file_name, content):
-    """Save the original JSON content to DBFS as-is."""
-    json_path = f"{JSON_BASE_PATH}/{file_name}"
-    dbutils.fs.put(json_path, json.dumps(content, indent=2), overwrite=True)
+def save_raw_json(file_name, content, df):
+    """Save the original JSON content to Azure storage."""
+    json_path = f"{JSON_BASE_PATH}/{file_name.rsplit('.', 1)[0]}"
+    df.write.format("json").mode("overwrite").save(json_path)
     print(f"  ✅ JSON: {json_path}")
 
 
@@ -189,25 +191,40 @@ def run():
             errors.append(f"{file_name}: failed to fetch content")
             continue
 
-        # Save original JSON file
-        json_path = f"{JSON_BASE_PATH}/{file_name}"
+        # Build a Spark DataFrame from the raw JSON — no transformation
+        records = content if isinstance(content, list) else [content]
+        df = spark.createDataFrame(pd.json_normalize(records))
+
+        # Cast NullType columns to StringType (Delta doesn't support NullType)
+        for field in df.schema.fields:
+            if isinstance(field.dataType, NullType):
+                df = df.withColumn(field.name, df[field.name].cast(StringType()))
+
+        suffix = file_name_to_table_suffix(file_name)
+        delta_table = f"{TABLE_PREFIX}_{suffix}"
+        parquet_path = f"{PARQUET_BASE_PATH}/{suffix}"
+        json_path = f"{JSON_BASE_PATH}/{suffix}"
+
+        # Save original JSON to Azure storage
         try:
-            save_raw_json(file_name, content)
+            save_raw_json(file_name, content, df)
             created_json.append(json_path)
         except Exception as e:
             msg = f"{file_name}: JSON save failed — {e}"
             errors.append(msg)
             log_error(msg)
 
-        # Build a Spark DataFrame from the raw JSON — no transformation
-        records = content if isinstance(content, list) else [content]
-        df = spark.createDataFrame(pd.json_normalize(records))
+        # Write as Parquet to Azure storage
+        try:
+            df.write.format("parquet").mode("overwrite").save(parquet_path)
+            print(f"  ✅ Parquet: {parquet_path}")
+            created_parquet.append(parquet_path)
+        except Exception as e:
+            msg = f"{file_name}: Parquet write failed — {e}"
+            errors.append(msg)
+            log_error(msg)
 
-        suffix = file_name_to_table_suffix(file_name)
-        delta_table = f"{TABLE_PREFIX}_{suffix}"
-        parquet_path = f"{PARQUET_BASE_PATH}/{suffix}"
-
-        # Write as Delta table
+        # Write as Delta table on Databricks
         try:
             (
                 df.write
@@ -221,21 +238,6 @@ def run():
             created_delta.append(delta_table)
         except Exception as e:
             msg = f"{file_name}: Delta write failed — {e}"
-            errors.append(msg)
-            log_error(msg)
-
-        # Write as Parquet
-        try:
-            (
-                df.write
-                .format("parquet")
-                .mode("overwrite")
-                .save(parquet_path)
-            )
-            print(f"  ✅ Parquet: {parquet_path}")
-            created_parquet.append(parquet_path)
-        except Exception as e:
-            msg = f"{file_name}: Parquet write failed — {e}"
             errors.append(msg)
             log_error(msg)
 
