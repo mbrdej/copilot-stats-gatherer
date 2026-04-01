@@ -10,6 +10,7 @@ import time
 import json
 import urllib.parse
 import requests
+import pandas as pd
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession, Row
@@ -199,9 +200,8 @@ def run():
             log_error(msg)
 
         # Build a Spark DataFrame from the raw JSON — no transformation
-        raw_json_str = json.dumps(content) if not isinstance(content, list) else json.dumps(content)
-        rdd = spark.sparkContext.parallelize([raw_json_str] if not isinstance(content, list) else [json.dumps(r) for r in content])
-        df = spark.read.json(rdd)
+        records = content if isinstance(content, list) else [content]
+        df = spark.createDataFrame(pd.json_normalize(records))
 
         suffix = file_name_to_table_suffix(file_name)
         delta_table = f"{TABLE_PREFIX}_{suffix}"
