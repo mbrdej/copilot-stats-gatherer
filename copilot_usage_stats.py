@@ -5,15 +5,14 @@
 # =============================================================================
 
 import sys
+import re
 import time
 import json
 import urllib.parse
 import requests
-import pandas as pd
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession, Row
-from pyspark.sql.functions import current_timestamp, lit
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -24,7 +23,9 @@ from api_keys import gitlab_token_max
 GITLAB_API_URL = "https://git.easypack24.net/api/v4"
 CATALOG = "dev"
 SCHEMA = "tmr_team"
-TABLE = f"{CATALOG}.{SCHEMA}.bronze_copilot_usage_stats"
+TABLE_PREFIX = f"{CATALOG}.{SCHEMA}.bronze_copilot"
+PARQUET_BASE_PATH = f"/mnt/{CATALOG}/{SCHEMA}/copilot_usage"
+JSON_BASE_PATH = f"/mnt/{CATALOG}/{SCHEMA}/copilot_usage_json"
 ERROR_LOG_TABLE = f"{CATALOG}.{SCHEMA}.copilot_usage_error_logs"
 
 PROJECT_PATH = "ait/copilot-usage-stats"
@@ -147,6 +148,20 @@ def fetch_file_content(file_path):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def save_raw_json(file_name, content):
+    """Save the original JSON content to DBFS as-is."""
+    json_path = f"{JSON_BASE_PATH}/{file_name}"
+    dbutils.fs.put(json_path, json.dumps(content, indent=2), overwrite=True)
+    print(f"  ✅ JSON: {json_path}")
+
+
+def file_name_to_table_suffix(file_name):
+    """Turn 'Some-Report 2024.json' into 'some_report_2024'."""
+    stem = file_name.rsplit(".", 1)[0]
+    suffix = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")
+    return suffix
+
+
 def run():
     print(f"Listing JSON files in {PROJECT_PATH}/{REPORTS_PATH}/ ...")
     json_files = list_json_files()
@@ -155,8 +170,6 @@ def run():
     if not json_files:
         print("Nothing to process. Exiting.")
         return
-
-    all_rows = []
 
     for file_info in json_files:
         file_path = file_info["path"]
@@ -169,44 +182,37 @@ def run():
         if content is None:
             continue
 
-        if isinstance(content, list):
-            for record in content:
-                row = {"source_file": file_name, "raw_json": json.dumps(record)}
-                if isinstance(record, dict):
-                    for k, v in record.items():
-                        row[k] = str(v) if not isinstance(v, (str, type(None))) else v
-                all_rows.append(row)
-        elif isinstance(content, dict):
-            row = {"source_file": file_name, "raw_json": json.dumps(content)}
-            for k, v in content.items():
-                row[k] = str(v) if not isinstance(v, (str, type(None))) else v
-            all_rows.append(row)
-        else:
-            msg = f"Unexpected JSON type in {file_name}: {type(content).__name__}"
-            print(f"⚠️ {msg}")
-            log_error(msg, level="warning")
-            all_rows.append({"source_file": file_name, "raw_json": json.dumps(content)})
+        # Save original JSON file
+        save_raw_json(file_name, content)
 
-    if not all_rows:
-        print("No rows produced. Exiting.")
-        return
+        # Build a Spark DataFrame from the raw JSON — no transformation
+        raw_json_str = json.dumps(content) if not isinstance(content, list) else json.dumps(content)
+        rdd = spark.sparkContext.parallelize([raw_json_str] if not isinstance(content, list) else [json.dumps(r) for r in content])
+        df = spark.read.json(rdd)
 
-    print(f"Building DataFrame with {len(all_rows)} row(s) ...")
-    df_pd = pd.DataFrame(all_rows)
-    df_spark = spark.createDataFrame(df_pd)
-    df_spark = df_spark.withColumn("load_timestamp", current_timestamp())
-    df_spark = df_spark.withColumn("source_system", lit("gitlab_repo_file"))
+        suffix = file_name_to_table_suffix(file_name)
+        delta_table = f"{TABLE_PREFIX}_{suffix}"
+        parquet_path = f"{PARQUET_BASE_PATH}/{suffix}"
 
-    (
-        df_spark.write
-        .format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .saveAsTable(TABLE)
-    )
+        # Write as Delta table
+        (
+            df.write
+            .format("delta")
+            .mode("overwrite")
+            .option("overwriteSchema", "true")
+            .saveAsTable(delta_table)
+        )
+        row_count = spark.table(delta_table).count()
+        print(f"  ✅ Delta: {row_count} rows → {delta_table}")
 
-    row_count = spark.table(TABLE).count()
-    print(f"✅ Written {row_count} records to {TABLE}")
+        # Write as Parquet
+        (
+            df.write
+            .format("parquet")
+            .mode("overwrite")
+            .save(parquet_path)
+        )
+        print(f"  ✅ Parquet: {parquet_path}")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
