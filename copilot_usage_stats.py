@@ -280,11 +280,11 @@ def run():
 
     print(f"\nParquet files ({len(created_parquet)}):")
     for p in created_parquet:
-        print(f"  - {p}")
+        print(f"  - {p}.parquet")
 
     print(f"\nJSON files ({len(created_json)}):")
     for j in created_json:
-        print(f"  - {j}")
+        print(f"  - {j}.json")
 
     if errors:
         print(f"\n❌ Errors ({len(errors)}):")
