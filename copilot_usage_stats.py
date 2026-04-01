@@ -171,6 +171,11 @@ def run():
         print("Nothing to process. Exiting.")
         return
 
+    created_delta = []
+    created_parquet = []
+    created_json = []
+    errors = []
+
     for file_info in json_files:
         file_path = file_info["path"]
         file_name = file_info["name"]
@@ -180,10 +185,18 @@ def run():
         time.sleep(REQUEST_DELAY)
 
         if content is None:
+            errors.append(f"{file_name}: failed to fetch content")
             continue
 
         # Save original JSON file
-        save_raw_json(file_name, content)
+        json_path = f"{JSON_BASE_PATH}/{file_name}"
+        try:
+            save_raw_json(file_name, content)
+            created_json.append(json_path)
+        except Exception as e:
+            msg = f"{file_name}: JSON save failed — {e}"
+            errors.append(msg)
+            log_error(msg)
 
         # Build a Spark DataFrame from the raw JSON — no transformation
         raw_json_str = json.dumps(content) if not isinstance(content, list) else json.dumps(content)
@@ -195,24 +208,62 @@ def run():
         parquet_path = f"{PARQUET_BASE_PATH}/{suffix}"
 
         # Write as Delta table
-        (
-            df.write
-            .format("delta")
-            .mode("overwrite")
-            .option("overwriteSchema", "true")
-            .saveAsTable(delta_table)
-        )
-        row_count = spark.table(delta_table).count()
-        print(f"  ✅ Delta: {row_count} rows → {delta_table}")
+        try:
+            (
+                df.write
+                .format("delta")
+                .mode("overwrite")
+                .option("overwriteSchema", "true")
+                .saveAsTable(delta_table)
+            )
+            row_count = spark.table(delta_table).count()
+            print(f"  ✅ Delta: {row_count} rows → {delta_table}")
+            created_delta.append(delta_table)
+        except Exception as e:
+            msg = f"{file_name}: Delta write failed — {e}"
+            errors.append(msg)
+            log_error(msg)
 
         # Write as Parquet
-        (
-            df.write
-            .format("parquet")
-            .mode("overwrite")
-            .save(parquet_path)
-        )
-        print(f"  ✅ Parquet: {parquet_path}")
+        try:
+            (
+                df.write
+                .format("parquet")
+                .mode("overwrite")
+                .save(parquet_path)
+            )
+            print(f"  ✅ Parquet: {parquet_path}")
+            created_parquet.append(parquet_path)
+        except Exception as e:
+            msg = f"{file_name}: Parquet write failed — {e}"
+            errors.append(msg)
+            log_error(msg)
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+
+    print(f"\nDelta tables ({len(created_delta)}):")
+    for t in created_delta:
+        print(f"  - {t}")
+
+    print(f"\nParquet files ({len(created_parquet)}):")
+    for p in created_parquet:
+        print(f"  - {p}")
+
+    print(f"\nJSON files ({len(created_json)}):")
+    for j in created_json:
+        print(f"  - {j}")
+
+    if errors:
+        print(f"\n❌ Errors ({len(errors)}):")
+        for e in errors:
+            print(f"  - {e}")
+    else:
+        print("\nNo errors.")
+
+    print()
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
