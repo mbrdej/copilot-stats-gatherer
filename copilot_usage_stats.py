@@ -1,7 +1,15 @@
 # =============================================================================
 # Copilot Usage Stats — Bronze Ingestion
-# Fetches JSON reports from GitLab repo ait/copilot-usage-stats and writes
-# them to a Delta table in Databricks.
+#
+# Fetches JSON reports from GitLab repo ait/copilot-usage-stats and creates
+# a separate output per file:
+#   - Delta table on Databricks (dev.tmr_team.bronze_copilot_<file>)
+#   - Parquet on Azure ADLS (abfss://.../copilot_usage/<file>)
+#   - JSON on Azure ADLS   (abfss://.../copilot_usage_json/<file>)
+#
+# Data is not transformed — the original JSON structure is preserved.
+# NullType columns are cast to StringType for Delta compatibility.
+# Errors are logged to dev.tmr_team.copilot_usage_error_logs.
 # =============================================================================
 
 import sys
