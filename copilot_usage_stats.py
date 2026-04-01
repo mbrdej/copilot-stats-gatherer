@@ -221,9 +221,12 @@ def run():
             errors.append(f"{file_name}: failed to fetch content")
             continue
 
-        # Build a Spark DataFrame from the raw JSON — preserving original structure
+        # Build a Spark DataFrame from the raw JSON — no transformation
         records = content if isinstance(content, list) else [content]
-        df = spark.createDataFrame(pd.DataFrame(records))
+        pdf = pd.json_normalize(records)
+        # Replace dots in column names — Spark treats dots as struct access
+        pdf.columns = [c.replace(".", "_") for c in pdf.columns]
+        df = spark.createDataFrame(pdf)
 
         # Recursively cast NullType to StringType (Delta/Parquet don't support NullType)
         df = apply_fixed_schema(df)
